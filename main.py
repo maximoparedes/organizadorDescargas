@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -16,6 +17,8 @@ MAX_HOJAS_EXCEL = 3
 MAX_CARACTERES_TEXTO = 3000
 MAX_LARGO_NOMBRE_CATEGORIA = 40
 CARACTERES_INVALIDOS_CARPETA = '<>:"/\\|?*'
+EXTENSIONES_DESCARGA_EN_CURSO = {"crdownload", "tmp", "part", "partial", "download"}
+SEGUNDOS_MINIMOS_DESDE_MODIFICACION = 3
 
 
 def cargar_reglas(config_path: Path) -> dict:
@@ -225,10 +228,25 @@ def clasificar_documento(archivo: Path, carpeta_documentos: Path) -> str:
     return categoria or CATEGORIA_SIN_CLASIFICAR
 
 
+def archivo_listo_para_mover(archivo: Path) -> bool:
+    ext = archivo.suffix.lower().lstrip(".")
+    if ext in EXTENSIONES_DESCARGA_EN_CURSO:
+        return False
+
+    try:
+        segundos_desde_modificacion = time.time() - archivo.stat().st_mtime
+    except FileNotFoundError:
+        return False
+
+    return segundos_desde_modificacion >= SEGUNDOS_MINIMOS_DESDE_MODIFICACION
+
+
 def organizar_carpeta(carpeta: Path, reglas: dict) -> None:
     mapa_extensiones = construir_mapa_extensiones(reglas)
 
-    archivos = [f for f in carpeta.iterdir() if f.is_file()]
+    archivos = [
+        f for f in carpeta.iterdir() if f.is_file() and archivo_listo_para_mover(f)
+    ]
 
     for archivo in archivos:
         categoria = categoria_para_archivo(archivo, mapa_extensiones)

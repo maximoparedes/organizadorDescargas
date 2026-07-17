@@ -3,3 +3,4 @@ pypdf
 python-docx
 openpyxl
 xlrd
+watchdog

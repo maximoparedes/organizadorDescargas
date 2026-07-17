@@ -1,4 +1,5 @@
 """Vigila la carpeta de Descargas y organiza los archivos apenas terminan de bajar."""
+import logging
 import threading
 import time
 
@@ -36,18 +37,19 @@ class ManejadorDescargas(FileSystemEventHandler):
             reglas = main.cargar_reglas(main.CONFIG_PATH)
             main.organizar_carpeta(self.carpeta_descargas, reglas)
         except Exception as e:
-            print(f"Error organizando: {e}")
+            logging.error(f"Error organizando: {e}")
 
 
 def main_vigilancia() -> None:
+    main.configurar_logging()
     carpeta_descargas = main.obtener_carpeta_descargas()
 
     if not carpeta_descargas.is_dir():
-        print(f"No se encontró la carpeta de Descargas: {carpeta_descargas}")
+        logging.error(f"No se encontró la carpeta de Descargas: {carpeta_descargas}")
         return
 
-    print(f"Vigilando: {carpeta_descargas}")
-    print("Los archivos nuevos se van a organizar solos unos segundos después de terminar de descargarse.")
+    logging.info(f"Vigilando: {carpeta_descargas}")
+    logging.info("Los archivos nuevos se van a organizar solos unos segundos después de terminar de descargarse.")
 
     manejador = ManejadorDescargas(carpeta_descargas)
     observador = Observer()

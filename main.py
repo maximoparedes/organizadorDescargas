@@ -1,11 +1,13 @@
 """Organizador automático de archivos para la carpeta de Descargas."""
 import json
+import logging
 import os
 import shutil
 import time
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
+LOG_PATH = Path(__file__).parent / "organizador.log"
 CATEGORIA_OTROS = "Otros"
 CATEGORIA_DOCUMENTOS = "Documentos"
 CATEGORIA_SIN_CLASIFICAR = "Sin_Clasificar"
@@ -19,6 +21,21 @@ MAX_LARGO_NOMBRE_CATEGORIA = 40
 CARACTERES_INVALIDOS_CARPETA = '<>:"/\\|?*'
 EXTENSIONES_DESCARGA_EN_CURSO = {"crdownload", "tmp", "part", "partial", "download"}
 SEGUNDOS_MINIMOS_DESDE_MODIFICACION = 3
+
+
+def configurar_logging() -> None:
+    if logging.getLogger().handlers:
+        return  # ya configurado (evita duplicar handlers si se llama más de una vez)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.FileHandler(LOG_PATH, encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 
 
 def cargar_reglas(config_path: Path) -> dict:
@@ -211,7 +228,8 @@ def clasificar_categoria(
         texto_respuesta = next(
             (b.text for b in respuesta.content if b.type == "text"), ""
         ).strip()
-    except Exception:
+    except Exception as e:
+        logging.warning(f"Fallo la clasificación por IA de '{nombre_archivo}': {e}")
         return None
 
     for categoria in categorias_existentes:
@@ -261,20 +279,21 @@ def organizar_carpeta(carpeta: Path, reglas: dict) -> None:
         carpeta_destino.mkdir(parents=True, exist_ok=True)
         destino = destino_sin_colision(carpeta_destino, archivo.name)
         shutil.move(str(archivo), str(destino))
-        print(f"Movido: {archivo.name} -> {carpeta_destino.relative_to(carpeta)}/{destino.name}")
+        logging.info(f"Movido: {archivo.name} -> {carpeta_destino.relative_to(carpeta)}/{destino.name}")
 
 
 def main() -> None:
+    configurar_logging()
     carpeta_descargas = obtener_carpeta_descargas()
 
     if not carpeta_descargas.is_dir():
-        print(f"No se encontró la carpeta de Descargas: {carpeta_descargas}")
+        logging.error(f"No se encontró la carpeta de Descargas: {carpeta_descargas}")
         return
 
     reglas = cargar_reglas(CONFIG_PATH)
-    print(f"Organizando: {carpeta_descargas}")
+    logging.info(f"Organizando: {carpeta_descargas}")
     organizar_carpeta(carpeta_descargas, reglas)
-    print("Listo.")
+    logging.info("Listo.")
 
 
 if __name__ == "__main__":

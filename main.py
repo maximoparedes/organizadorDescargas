@@ -1,8 +1,11 @@
-"""Organizador automático de archivos para la carpeta de Descargas."""
+"""Organizador y mantenimiento automático de archivos para la PC."""
+import hashlib
 import json
 import logging
 import os
 import shutil
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -20,7 +23,30 @@ MAX_CARACTERES_TEXTO = 3000
 MAX_LARGO_NOMBRE_CATEGORIA = 40
 CARACTERES_INVALIDOS_CARPETA = '<>:"/\\|?*'
 EXTENSIONES_DESCARGA_EN_CURSO = {"crdownload", "tmp", "part", "partial", "download"}
+EXTENSIONES_IGNORADAS = {"lnk", "url", "ini"}
 SEGUNDOS_MINIMOS_DESDE_MODIFICACION = 3
+
+CARPETA_REVISION_DUPLICADOS = Path.home() / "Desktop" / "revision_duplicados"
+
+def _carpetas_temporales() -> list[Path]:
+    candidatas = [
+        Path(os.environ.get("TEMP", tempfile.gettempdir())),
+        Path(os.environ.get("TMP", tempfile.gettempdir())),
+        (Path(os.environ["LOCALAPPDATA"]) / "Temp") if os.environ.get("LOCALAPPDATA") else None,
+    ]
+    vistas = set()
+    resultado = []
+    for carpeta in candidatas:
+        if not carpeta or not carpeta.exists():
+            continue
+        resuelta = carpeta.resolve()
+        if resuelta not in vistas:
+            vistas.add(resuelta)
+            resultado.append(carpeta)
+    return resultado
+
+
+CARPETAS_TEMPORALES = _carpetas_temporales()
 
 
 def configurar_logging() -> None:
@@ -45,6 +71,11 @@ def cargar_reglas(config_path: Path) -> dict:
 
 def obtener_carpeta_descargas() -> Path:
     return Path(os.path.expanduser("~")) / "Downloads"
+
+
+def obtener_carpetas_a_organizar(reglas: dict) -> list[Path]:
+    home = Path(os.path.expanduser("~"))
+    return [home / nombre for nombre in reglas.get("carpetas_a_organizar", ["Downloads"])]
 
 
 def construir_mapa_extensiones(reglas: dict[str, list[str]]) -> dict[str, str]:
@@ -260,10 +291,17 @@ def archivo_listo_para_mover(archivo: Path) -> bool:
 
 
 def organizar_carpeta(carpeta: Path, reglas: dict) -> None:
-    mapa_extensiones = construir_mapa_extensiones(reglas)
+    if not carpeta.is_dir():
+        return
+
+    mapa_extensiones = construir_mapa_extensiones(reglas["categorias"])
 
     archivos = [
-        f for f in carpeta.iterdir() if f.is_file() and archivo_listo_para_mover(f)
+        f
+        for f in carpeta.iterdir()
+        if f.is_file()
+        and f.suffix.lower().lstrip(".") not in EXTENSIONES_IGNORADAS
+        and archivo_listo_para_mover(f)
     ]
 
     for archivo in archivos:
@@ -282,17 +320,146 @@ def organizar_carpeta(carpeta: Path, reglas: dict) -> None:
         logging.info(f"Movido: {archivo.name} -> {carpeta_destino.relative_to(carpeta)}/{destino.name}")
 
 
-def main() -> None:
-    configurar_logging()
-    carpeta_descargas = obtener_carpeta_descargas()
+# ----------------------------------------------------------------------
+# MANTENIMIENTO: temporales, duplicados, programas instalados
+# ----------------------------------------------------------------------
 
-    if not carpeta_descargas.is_dir():
-        logging.error(f"No se encontró la carpeta de Descargas: {carpeta_descargas}")
+
+def tamano_legible(cantidad_bytes: float) -> str:
+    for unidad in ["B", "KB", "MB", "GB"]:
+        if cantidad_bytes < 1024:
+            return f"{cantidad_bytes:.1f} {unidad}"
+        cantidad_bytes /= 1024
+    return f"{cantidad_bytes:.1f} TB"
+
+
+def limpiar_temporales(ejecutar: bool) -> None:
+    total_liberado = 0
+    total_elementos = 0
+
+    for carpeta in CARPETAS_TEMPORALES:
+        logging.info(f"Revisando temporales en: {carpeta}")
+        for item in carpeta.glob("*"):
+            try:
+                if item.is_file():
+                    tamano = item.stat().st_size
+                    if ejecutar:
+                        item.unlink()
+                    total_liberado += tamano
+                    total_elementos += 1
+                elif item.is_dir():
+                    tamano = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                    if ejecutar:
+                        shutil.rmtree(item, ignore_errors=True)
+                    total_liberado += tamano
+                    total_elementos += 1
+            except (PermissionError, OSError):
+                continue  # archivo en uso, se saltea sin cortar el script
+
+    accion = "Liberados" if ejecutar else "Se liberarían (simulación)"
+    logging.info(f"Temporales: {accion} {tamano_legible(total_liberado)} en {total_elementos} elementos")
+
+
+def hash_archivo(archivo: Path, bloque: int = 65536) -> str | None:
+    h = hashlib.md5()
+    try:
+        with open(archivo, "rb") as f:
+            while chunk := f.read(bloque):
+                h.update(chunk)
+        return h.hexdigest()
+    except (PermissionError, OSError):
+        return None
+
+
+def buscar_duplicados(ejecutar: bool, carpetas: list[Path]) -> None:
+    hashes: dict[str, Path] = {}
+    duplicados: list[tuple[Path, Path]] = []
+
+    for carpeta in carpetas:
+        if not carpeta.is_dir():
+            continue
+        logging.info(f"Escaneando duplicados en: {carpeta}")
+        for archivo in carpeta.rglob("*"):
+            if not archivo.is_file() or CARPETA_REVISION_DUPLICADOS in archivo.parents:
+                continue
+            h = hash_archivo(archivo)
+            if h is None:
+                continue
+            if h in hashes:
+                duplicados.append((archivo, hashes[h]))
+            else:
+                hashes[h] = archivo
+
+    logging.info(f"Duplicados: encontrados {len(duplicados)} archivos")
+
+    if not duplicados:
         return
 
+    if not ejecutar:
+        for dup, original in duplicados:
+            logging.info(f"  {dup} -> duplicado de {original}")
+        return
+
+    CARPETA_REVISION_DUPLICADOS.mkdir(parents=True, exist_ok=True)
+    for dup, original in duplicados:
+        try:
+            destino = destino_sin_colision(CARPETA_REVISION_DUPLICADOS, dup.name)
+            shutil.move(str(dup), str(destino))
+            logging.info(f"Duplicado movido a revisión: {dup.name} (copia de {original.name})")
+        except (PermissionError, OSError) as e:
+            logging.warning(f"No se pudo mover duplicado {dup.name}: {e}")
+    logging.info(f"Revisá y borrá manualmente lo que no necesites en: {CARPETA_REVISION_DUPLICADOS}")
+
+
+def listar_programas() -> None:
+    if sys.platform != "win32":
+        logging.info("El listado de programas instalados solo funciona en Windows.")
+        return
+
+    import winreg
+
+    rutas = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+
+    programas = []
+    for hive, ruta in rutas:
+        try:
+            with winreg.OpenKey(hive, ruta) as clave:
+                for i in range(winreg.QueryInfoKey(clave)[0]):
+                    try:
+                        subclave_nombre = winreg.EnumKey(clave, i)
+                        with winreg.OpenKey(clave, subclave_nombre) as subclave:
+                            nombre = winreg.QueryValueEx(subclave, "DisplayName")[0]
+                            try:
+                                fecha = winreg.QueryValueEx(subclave, "InstallDate")[0]
+                            except FileNotFoundError:
+                                fecha = "?"
+                            programas.append((nombre, fecha))
+                    except (FileNotFoundError, OSError):
+                        continue
+        except FileNotFoundError:
+            continue
+
+    programas = sorted(set(programas))
+    for nombre, fecha in programas:
+        logging.info(f"  {nombre}  (instalado: {fecha})")
+    logging.info(f"Programas instalados: {len(programas)} en total")
+
+
+def main() -> None:
+    configurar_logging()
     reglas = cargar_reglas(CONFIG_PATH)
-    logging.info(f"Organizando: {carpeta_descargas}")
-    organizar_carpeta(carpeta_descargas, reglas)
+
+    for carpeta in obtener_carpetas_a_organizar(reglas):
+        if not carpeta.is_dir():
+            logging.error(f"No se encontró la carpeta: {carpeta}")
+            continue
+        logging.info(f"Organizando: {carpeta}")
+        organizar_carpeta(carpeta, reglas)
+
     logging.info("Listo.")
 
 
